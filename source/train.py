@@ -1,6 +1,8 @@
 import os
 import torch.nn as nn
 import torch
+from tqdm.auto import tqdm
+
 
 # Define the training function
 def train_model(
@@ -22,7 +24,9 @@ def train_model(
         # ---- Training ----
         model.train()
         train_loss = 0.0
-        for mix, targets in train_loader:
+        pbar = tqdm(train_loader)
+        for i, (mix, targets) in enumerate(pbar):
+        # for mix, targets in train_loader:
             mix, targets = mix.to(device), targets.to(device)
 
             # Zero gradients
