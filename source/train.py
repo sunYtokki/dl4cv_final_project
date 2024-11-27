@@ -35,16 +35,27 @@ class EarlyStopping:
                 self.early_stop = True
                 print(self.prompt)
 
+def masked_loss(y_, y, q=0.95, coarse=True):
+    # shape = [num_sources, batch_size, num_channels, chunk_size]
+    loss = torch.nn.MSELoss(reduction='none')(y_, y).transpose(0, 1)
+    if coarse:
+        loss = torch.mean(loss, dim=(-1, -2))
+    loss = loss.reshape(loss.shape[0], -1)
+    L = loss.detach()
+    quantile = torch.quantile(L, q, interpolation='linear', dim=1, keepdim=True)
+    mask = L < quantile
+    return (loss * mask).mean()
+
 # Define the training function
 def train_model(
     model, train_loader, val_loader,
-    epochs=100, learning_rate=1e-4, output_dir="./model/",
+    epochs=100, learning_rate=9.0e-05, output_dir="./model/",
     device="cpu", early_stopping=None 
 ):
     # Loss and optimizer
-    criterion = nn.MSELoss()  # Mean squared error loss
+    # criterion = nn.MSELoss()  # Mean squared error loss
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    scheduler = ReduceLROnPlateau(optimizer, 'max', patience=5, verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, 'max', patience=2, verbose=True)
 
     for epoch in range(epochs):
         print("-" * 20)
@@ -67,7 +78,13 @@ def train_model(
             # print(f"output shape: {outputs.shape}")
 
             # Compute loss
-            loss = criterion(outputs, targets)
+            # loss = criterion(outputs, targets)
+
+            loss = masked_loss(
+                outputs,
+                targets
+            )
+
             train_loss += loss.item()
 
             # Backward pass
@@ -90,7 +107,11 @@ def train_model(
                 outputs = model(mix)
 
                 # Compute loss
-                loss = criterion(outputs, targets)
+                # loss = criterion(outputs, targets)
+                loss = masked_loss(
+                    outputs,
+                    targets
+                )
                 val_loss += loss.item()
 
         # Calculate average validation loss and accuracy for the epoch
