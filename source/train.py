@@ -126,7 +126,7 @@ def train_model(
     os.makedirs(output_dir, exist_ok=True)
 
     print('saving attempt')
-    checkpoint_path = os.path.join(output_dir, f"checkpoint_epoch_{"trial"}.pth")
+    checkpoint_path = os.path.join(output_dir, "checkpoint_epoch_trial.pth")
     torch.save(model.state_dict(), checkpoint_path)
 
     # Initialize optimizer and scheduler
