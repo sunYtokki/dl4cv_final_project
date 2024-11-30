@@ -125,6 +125,9 @@ def train_model(
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
+    checkpoint_path = os.path.join(output_dir, f"checkpoint_epoch_{"trial"}.pth")
+    torch.save(model.state_dict(), checkpoint_path)
+
     # Initialize optimizer and scheduler
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     scheduler = ReduceLROnPlateau(optimizer, 'min', patience=2, verbose=True)
