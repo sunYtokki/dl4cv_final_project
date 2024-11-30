@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm.auto import tqdm
+from google.cloud import storage
 
 # Helper class for early stopping logic on validation loss
 class EarlyStopping:
@@ -32,6 +33,23 @@ class EarlyStopping:
             if self.counter >= self.patience:
                 self.early_stop = True
                 print(self.prompt)
+
+# TODO: move to utils
+def upload_model_to_gcs(model, bucket_name, model_dir, epoch):
+    local_model_path = f"model_epoch_{epoch + 1}.pth"
+    torch.save(model.state_dict(), local_model_path)
+
+    client = storage.Client(project="deep-learning-final-443023")
+    bucket = client.bucket(bucket_name)
+
+    gcs_model_path = os.path.join(model_dir, f"model_epoch_{epoch + 1}.pth")
+
+    blob = bucket.blob(gcs_model_path)
+    blob.upload_from_filename(local_model_path)
+
+    print(f"Model for epoch {epoch + 1} uploaded to {gcs_model_path}")
+
+    os.remove(local_model_path)
 
 # SDR Calculation Function
 def sdr(references, estimates):
@@ -101,7 +119,8 @@ def normalize(mix, targets):
 def train_model(
     model, train_loader, val_loader,
     epochs=100, learning_rate=9.0e-05, output_dir="./model/",
-    device="cpu", early_stopping=None, loss_type="si_snr", normalize_data=True
+    device="cpu", early_stopping=None, loss_type="si_snr", normalize_data=True,
+    gcs_bucket_name=None, gcs_model_dir=None
 ):
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
@@ -186,5 +205,9 @@ def train_model(
             early_stopping(val_loss, model, output_dir, epoch)  # Minimize validation loss
             if early_stopping.early_stop:
                 break
+
+        if gcs_bucket_name and gcs_model_dir:
+            upload_model_to_gcs(model, gcs_bucket_name, gcs_model_dir, epoch)
+
 
     return model
