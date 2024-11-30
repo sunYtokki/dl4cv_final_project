@@ -125,13 +125,9 @@ def train_model(
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
-    print('saving attempt')
-    checkpoint_path = os.path.join(output_dir, "checkpoint_epoch_trial.pth")
-    torch.save(model.state_dict(), checkpoint_path)
-
     # Initialize optimizer and scheduler
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=2, verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=2)
 
     # Select loss function
     if loss_type == "si_snr":
@@ -203,6 +199,7 @@ def train_model(
 
         # Scheduler step 
         scheduler.step(val_loss)
+        print(f"Learning rate after epoch {epoch + 1}: {scheduler.optimizer.param_groups[0]['lr']:.8e}")
 
         # Early stopping 
         if early_stopping:
