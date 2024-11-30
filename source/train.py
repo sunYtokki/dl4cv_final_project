@@ -83,23 +83,32 @@ def si_snr_loss(preds, targets, eps=1e-8):
     return -torch.mean(si_snr)
 
 def normalize(mix, targets):
-    mean = mix.mean()
-    std = mix.std()
-    if std != 0:
-        mix = (mix - mean) / std
-        targets = (targets - mean) / std
-    return mix, targets
+    # Normalize mix
+    mean_mix = mix.mean(dim=(1, 2), keepdim=True)
+    std_mix = mix.std(dim=(1, 2), keepdim=True)
+    std_mix[std_mix == 0] = 1.0  # Avoid division by zero
+    mix = (mix - mean_mix) / std_mix
 
+    # Normalize targets
+    mean_targets = targets.mean(dim=(1, 2), keepdim=True)
+    std_targets = targets.std(dim=(1, 2), keepdim=True)
+    std_targets[std_targets == 0] = 1.0
+    targets = (targets - mean_targets) / std_targets
+
+    return mix, targets
 
 # Training function
 def train_model(
     model, train_loader, val_loader,
     epochs=100, learning_rate=9.0e-05, output_dir="./model/",
-    device="cpu", early_stopping=None, loss_type="si_snr"
+    device="cpu", early_stopping=None, loss_type="si_snr", normalize_data=True
 ):
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+
     # Initialize optimizer and scheduler
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    scheduler = ReduceLROnPlateau(optimizer, 'max', patience=2, verbose=True)  # Use 'max' for SDR
+    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=2, verbose=True)
 
     # Select loss function
     if loss_type == "si_snr":
@@ -118,7 +127,8 @@ def train_model(
         train_loss = 0.0
         for mix, targets in tqdm(train_loader):
             mix, targets = mix.to(device), targets.to(device)
-            mix, targets = normalize(mix, targets)
+            if normalize_data:
+                mix, targets = normalize(mix, targets)
             optimizer.zero_grad()
 
             # Forward pass
@@ -143,6 +153,8 @@ def train_model(
         with torch.no_grad():
             for mix, targets in val_loader:
                 mix, targets = mix.to(device), targets.to(device)
+                if normalize_data:
+                    mix, targets = normalize(mix, targets)
 
                 # Forward pass
                 outputs = model(mix)
@@ -171,7 +183,7 @@ def train_model(
 
         # Early stopping 
         if early_stopping:
-            early_stopping(val_loss, model, output_dir, epoch)  # Minimize negative SDR
+            early_stopping(val_loss, model, output_dir, epoch)  # Minimize validation loss
             if early_stopping.early_stop:
                 break
 
