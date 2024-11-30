@@ -1,10 +1,8 @@
 import os
 import numpy as np
-
-import torch.nn as nn
 import torch
+import torch.nn as nn
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-
 from tqdm.auto import tqdm
 
 # Helper class for early stopping logic on validation loss
@@ -18,16 +16,15 @@ class EarlyStopping:
         self.prompt = "Early stopping triggered"
 
     def __call__(self, val_loss, model, output_dir, epoch):
-        # Save checkpoint
+        # Save checkpoint for every epoch
         checkpoint_path = os.path.join(output_dir, f"checkpoint_epoch_{epoch + 1}.pth")
         torch.save(model.state_dict(), checkpoint_path)
 
         # Check if validation loss has improved
         if val_loss < self.best_loss - self.min_delta:
             self.best_loss = val_loss
-            self.counter = 0
-            if model:
-                torch.save(model.state_dict(), os.path.join(output_dir, "best_model.pth"))
+            self.counter = 0  # Reset counter if improvement is seen
+            torch.save(model.state_dict(), os.path.join(output_dir, "best_model.pth"))
             print(f"Validation loss improved to {val_loss:.8f}, model saved.")
         else:
             self.counter += 1
@@ -37,7 +34,7 @@ class EarlyStopping:
                 print(self.prompt)
 
 # SDR Calculation Function
-def compute_sdr(references, estimates):
+def sdr(references, estimates):
     delta = 1e-7  # To avoid numerical errors
     num = np.sum(np.square(references), axis=-1)  # Sum over samples
     den = np.sum(np.square(references - estimates), axis=-1)  # Error term
@@ -57,14 +54,60 @@ def masked_loss(y_, y, q=0.95, coarse=True):
     mask = L < quantile
     return (loss * mask).mean()
 
-# Training Function
+# SI-SNR Loss function
+def si_snr_loss(preds, targets, eps=1e-8):
+    """
+    Compute the Scale-Invariant Signal-to-Noise Ratio (SI-SNR) loss.
+    Args:
+        preds (torch.Tensor): Predicted signals of shape (batch_size, num_channels, signal_length).
+        targets (torch.Tensor): Target signals of shape (batch_size, num_channels, signal_length).
+        eps (float): Small value to avoid division by zero.
+    Returns:
+        torch.Tensor: The SI-SNR loss value.
+    """
+    # Ensure zero-mean signals
+    preds_mean = torch.mean(preds, dim=-1, keepdim=True)
+    targets_mean = torch.mean(targets, dim=-1, keepdim=True)
+    preds = preds - preds_mean
+    targets = targets - targets_mean
+
+    # Compute the scaling factor
+    scale = torch.sum(preds * targets, dim=-1, keepdim=True) / (torch.sum(targets ** 2, dim=-1, keepdim=True) + eps)
+    s_target = scale * targets
+    e_noise = preds - s_target
+
+    # Compute SI-SNR
+    si_snr = 10 * torch.log10((torch.sum(s_target ** 2, dim=-1) + eps) / (torch.sum(e_noise ** 2, dim=-1) + eps))
+
+    # Return the negative SI-SNR loss (to minimize)
+    return -torch.mean(si_snr)
+
+def normalize(mix, targets):
+    mean = mix.mean()
+    std = mix.std()
+    if std != 0:
+        mix = (mix - mean) / std
+        targets = (targets - mean) / std
+    return mix, targets
+
+
+# Training function
 def train_model(
     model, train_loader, val_loader,
     epochs=100, learning_rate=9.0e-05, output_dir="./model/",
-    device="cpu", early_stopping=None
+    device="cpu", early_stopping=None, loss_type="si_snr"
 ):
+    # Initialize optimizer and scheduler
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=2, verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, 'max', patience=2, verbose=True)  # Use 'max' for SDR
+
+    # Select loss function
+    if loss_type == "si_snr":
+        loss_fn = si_snr_loss
+    elif loss_type == "masked":
+        loss_fn = masked_loss
+    else:
+        raise ValueError("Invalid loss_type. Choose 'si_snr' or 'masked'.")
 
     for epoch in range(epochs):
         print("-" * 20)
@@ -75,12 +118,17 @@ def train_model(
         train_loss = 0.0
         for mix, targets in tqdm(train_loader):
             mix, targets = mix.to(device), targets.to(device)
+            mix, targets = normalize(mix, targets)
             optimizer.zero_grad()
 
+            # Forward pass
             outputs = model(mix)
-            loss = masked_loss(outputs, targets)
+
+            # Compute loss
+            loss = loss_fn(outputs, targets)
             train_loss += loss.item()
 
+            # Backward pass
             loss.backward()
             optimizer.step()
 
@@ -100,19 +148,15 @@ def train_model(
                 outputs = model(mix)
 
                 # Compute loss
-                loss = masked_loss(outputs, targets)
+                loss = loss_fn(outputs, targets)
                 val_loss += loss.item()
 
-                # Compute SDR
-                targets_np = targets.cpu().numpy()  # Shape: [batch_size, num_stems, chunk_size]
-                outputs_np = outputs.cpu().numpy()  # Shape: [batch_size, num_stems, chunk_size]
-
-                # Compute SDR for each batch
-                for b in range(targets_np.shape[0]):  # Iterate over batch
-                    batch_sdr = compute_sdr(targets_np[b], outputs_np[b])
-                    total_sdr += batch_sdr
-
-                num_batches += targets_np.shape[0]
+                # SDR calculation
+                targets_np = targets.cpu().numpy()
+                outputs_np = outputs.cpu().numpy()
+                batch_sdr = sdr(targets_np, outputs_np)
+                total_sdr += np.mean(batch_sdr)
+                num_batches += 1
 
         # Calculate average validation loss and SDR
         val_loss /= len(val_loader)
@@ -122,12 +166,12 @@ def train_model(
         print(f"Validation Loss: {val_loss:.8f}")
         print(f"Average SDR: {avg_sdr:.8f} dB")
 
-        # Scheduler step
+        # Scheduler step 
         scheduler.step(val_loss)
 
-        # Early stopping
+        # Early stopping 
         if early_stopping:
-            early_stopping(val_loss, model, output_dir, epoch)
+            early_stopping(val_loss, model, output_dir, epoch)  # Minimize negative SDR
             if early_stopping.early_stop:
                 break
 
