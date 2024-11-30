@@ -205,9 +205,12 @@ def train_model(
             early_stopping(val_loss, model, output_dir, epoch)  # Minimize validation loss
             if early_stopping.early_stop:
                 break
+        else:
+            checkpoint_path = os.path.join(output_dir, f"checkpoint_epoch_{epoch + 1}.pth")
+            torch.save(model.state_dict(), checkpoint_path)
 
-        if gcs_bucket_name and gcs_model_dir:
-            upload_model_to_gcs(model, gcs_bucket_name, gcs_model_dir, epoch)
+            if gcs_bucket_name and gcs_model_dir:
+                upload_model_to_gcs(model, gcs_bucket_name, gcs_model_dir, epoch)
 
 
     return model
