@@ -1,0 +1,9 @@
+# TODO: fix the format 
+!pip install tqdm
+!pip install torchvision
+!pip install demucs
+!pip install librosa
+!pip install torch
+!pip install audiomentations
+!pip install soundfile
+!pip install pedalboard

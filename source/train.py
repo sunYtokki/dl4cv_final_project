@@ -1,68 +1,24 @@
-import os
-import numpy as np
-import torch
-import torch.nn as nn
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+import random
+import time
 from tqdm.auto import tqdm
-from google.cloud import storage
+import os
+import torch
+import numpy as np
+import torch.nn as nn
+from torch.optim import Adam
+from torch.utils.data import DataLoader
+from torch.cuda.amp.grad_scaler import GradScaler
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from demucs import pretrained
 
-# Helper class for early stopping logic on validation loss
-class EarlyStopping:
-    def __init__(self, patience=10, min_delta=0):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.counter = 0
-        self.best_loss = np.inf
-        self.early_stop = False
-        self.prompt = "Early stopping triggered"
+from dataset import MSSDataset
+from valid import valid
 
-    def __call__(self, val_loss, model, output_dir, epoch):
-        # Save checkpoint for every epoch
-        checkpoint_path = os.path.join(output_dir, f"checkpoint_epoch_{epoch + 1}.pth")
-        torch.save(model.state_dict(), checkpoint_path)
+import warnings
+warnings.filterwarnings("ignore")
 
-        # Check if validation loss has improved
-        if val_loss < self.best_loss - self.min_delta:
-            self.best_loss = val_loss
-            self.counter = 0  # Reset counter if improvement is seen
-            torch.save(model.state_dict(), os.path.join(output_dir, "best_model.pth"))
-            print(f"Validation loss improved to {val_loss:.8f}, model saved.")
-        else:
-            self.counter += 1
-            print(f"No improvement in validation loss. Counter: {self.counter}/{self.patience}")
-            if self.counter >= self.patience:
-                self.early_stop = True
-                print(self.prompt)
 
-# TODO: move to utils
-def upload_model_to_gcs(model, bucket_name, model_dir, epoch):
-    local_model_path = f"model_epoch_{epoch + 1}.pth"
-    torch.save(model.state_dict(), local_model_path)
-
-    client = storage.Client(project="deep-learning-final-443023")
-    bucket = client.bucket(bucket_name)
-
-    gcs_model_path = os.path.join(model_dir, f"model_epoch_{epoch + 1}.pth")
-
-    blob = bucket.blob(gcs_model_path)
-    blob.upload_from_filename(local_model_path)
-
-    print(f"Model for epoch {epoch + 1} uploaded to {gcs_model_path}")
-
-    os.remove(local_model_path)
-
-# SDR Calculation Function
-def sdr(references, estimates):
-    delta = 1e-7  # To avoid numerical errors
-    num = np.sum(np.square(references), axis=-1)  # Sum over samples
-    den = np.sum(np.square(references - estimates), axis=-1)  # Error term
-    num += delta
-    den += delta
-    sdr = 10 * np.log10(num / den)
-    return np.mean(sdr)  # Average SDR for the batch
-
-# Masked Loss Function
-def masked_loss(y_, y, q=0.95, coarse=True):
+def masked_loss(y_, y, q, coarse=True):
     loss = torch.nn.MSELoss(reduction='none')(y_, y).transpose(0, 1)
     if coarse:
         loss = torch.mean(loss, dim=(-1, -2))
@@ -72,145 +28,164 @@ def masked_loss(y_, y, q=0.95, coarse=True):
     mask = L < quantile
     return (loss * mask).mean()
 
-# SI-SNR Loss function
-def si_snr_loss(preds, targets, eps=1e-8):
-    """
-    Compute the Scale-Invariant Signal-to-Noise Ratio (SI-SNR) loss.
-    Args:
-        preds (torch.Tensor): Predicted signals of shape (batch_size, num_channels, signal_length).
-        targets (torch.Tensor): Target signals of shape (batch_size, num_channels, signal_length).
-        eps (float): Small value to avoid division by zero.
-    Returns:
-        torch.Tensor: The SI-SNR loss value.
-    """
-    # Ensure zero-mean signals
-    preds_mean = torch.mean(preds, dim=-1, keepdim=True)
-    targets_mean = torch.mean(targets, dim=-1, keepdim=True)
-    preds = preds - preds_mean
-    targets = targets - targets_mean
 
-    # Compute the scaling factor
-    scale = torch.sum(preds * targets, dim=-1, keepdim=True) / (torch.sum(targets ** 2, dim=-1, keepdim=True) + eps)
-    s_target = scale * targets
-    e_noise = preds - s_target
+def manual_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    os.environ["PYTHONHASHSEED"] = str(seed)
 
-    # Compute SI-SNR
-    si_snr = 10 * torch.log10((torch.sum(s_target ** 2, dim=-1) + eps) / (torch.sum(e_noise ** 2, dim=-1) + eps))
 
-    # Return the negative SI-SNR loss (to minimize)
-    return -torch.mean(si_snr)
+def load_not_compatible_weights(model, weights, verbose=False):
+    new_model = model.state_dict()
+    old_model = torch.load(weights)
+    if 'state' in old_model:
+        old_model = old_model['state']
+    if 'state_dict' in old_model:
+        old_model = old_model['state_dict']
+    for el in new_model:
+        if el in old_model:
+            new_model[el] = old_model[el]
+    model.load_state_dict(new_model)
 
-def normalize(mix, targets):
-    # Normalize mix
-    mean_mix = mix.mean(dim=(1, 2), keepdim=True)
-    std_mix = mix.std(dim=(1, 2), keepdim=True)
-    std_mix[std_mix == 0] = 1.0  # Avoid division by zero
-    mix = (mix - mean_mix) / std_mix
 
-    # Normalize targets
-    mean_targets = targets.mean(dim=(1, 2), keepdim=True)
-    std_targets = targets.std(dim=(1, 2), keepdim=True)
-    std_targets[std_targets == 0] = 1.0
-    targets = (targets - mean_targets) / std_targets
-
-    return mix, targets
-
-# Training function
 def train_model(
-    model, train_loader, val_loader,
-    epochs=100, learning_rate=9.0e-05, output_dir="./model/",
-    device="cpu", early_stopping=None, loss_type="si_snr", normalize_data=True,
-    gcs_bucket_name=None, gcs_model_dir=None
+    model,
+    results_path=None,
+    data_path=None,
+    valid_path=None,
+    num_epochs=100,
+    instruments = ['speech', 'music', 'sfx'],
+    batch_size = 6,
+    q = 0.95,
+    num_workers=4,
+    seed=42,
+    device_ids=[0],
 ):
-    # Ensure output directory exists
-    os.makedirs(output_dir, exist_ok=True)
+    manual_seed(seed + int(time.time()))
+    torch.backends.cudnn.deterministic = False
+    torch.multiprocessing.set_start_method('spawn')
 
-    # Initialize optimizer and scheduler
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=2, verbose=True)
+    # Load model and configuration
+    # model, config = get_model_from_config(model_type, config_path)
+    # config = OmegaConf.load(config_path)
+    print("Instruments: {}".format(instruments))
 
-    # Select loss function
-    if loss_type == "si_snr":
-        loss_fn = si_snr_loss
-    elif loss_type == "masked":
-        loss_fn = masked_loss
-    else:
-        raise ValueError("Invalid loss_type. Choose 'si_snr' or 'masked'.")
+    os.makedirs(results_path, exist_ok=True)
 
-    for epoch in range(epochs):
-        print("-" * 20)
-        print(f"Epoch {epoch + 1}/{epochs}")
+    # batch_size = config.training.batch_size * len(device_ids)
+    batch_size = batch_size * len(device_ids)
+    print("Metrics for training: SDR. Metric for scheduler: SDR")
 
-        # ---- Training Phase ----
-        model.train()
-        train_loss = 0.0
-        for mix, targets in tqdm(train_loader):
-            mix, targets = mix.to(device), targets.to(device)
-            if normalize_data:
-                mix, targets = normalize(mix, targets)
-            optimizer.zero_grad()
+    trainset = MSSDataset(
+        instruments = model.sources,
+        data_path=data_path,
+        batch_size=batch_size,
+        metadata_path=os.path.join(results_path, f'metadata.pkl'),
+    )
 
-            # Forward pass
-            outputs = model(mix)
+    train_loader = DataLoader(
+        trainset, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, pin_memory=True
+    )
 
-            # Compute loss
-            loss = loss_fn(outputs, targets)
-            train_loss += loss.item()
-
-            # Backward pass
-            loss.backward()
-            optimizer.step()
-
-        train_loss /= len(train_loader)
-        print(f"Training Loss: {train_loss:.8f}")
-
-        # ---- Validation Phase ----
-        model.eval()
-        val_loss = 0.0
-        total_sdr = 0.0
-        num_batches = 0
-        with torch.no_grad():
-            for mix, targets in val_loader:
-                mix, targets = mix.to(device), targets.to(device)
-                if normalize_data:
-                    mix, targets = normalize(mix, targets)
-
-                # Forward pass
-                outputs = model(mix)
-
-                # Compute loss
-                loss = loss_fn(outputs, targets)
-                val_loss += loss.item()
-
-                # SDR calculation
-                targets_np = targets.cpu().numpy()
-                outputs_np = outputs.cpu().numpy()
-                batch_sdr = sdr(targets_np, outputs_np)
-                total_sdr += np.mean(batch_sdr)
-                num_batches += 1
-
-        # Calculate average validation loss and SDR
-        val_loss /= len(val_loader)
-        avg_sdr = total_sdr / num_batches
-
-        # Print epoch results
-        print(f"Validation Loss: {val_loss:.8f}")
-        print(f"Average SDR: {avg_sdr:.8f} dB")
-
-        # Scheduler step 
-        scheduler.step(val_loss)
-
-        # Early stopping 
-        if early_stopping:
-            early_stopping(val_loss, model, output_dir, epoch)  # Minimize validation loss
-            if early_stopping.early_stop:
-                break
+    if torch.cuda.is_available():
+        if len(device_ids) <= 1:
+            device = torch.device(f'cuda:{device_ids[0]}')
+            model = model.to(device)
         else:
-            checkpoint_path = os.path.join(output_dir, f"checkpoint_epoch_{epoch + 1}.pth")
-            torch.save(model.state_dict(), checkpoint_path)
+            device = torch.device(f'cuda:{device_ids[0]}')
+            model = nn.DataParallel(model, device_ids=device_ids).to(device)
+    else:
+        device = 'cpu'
+        print('CUDA is not available. Running training on CPU.')
+        model = model.to(device)
 
-            if gcs_bucket_name and gcs_model_dir:
-                upload_model_to_gcs(model, gcs_bucket_name, gcs_model_dir, epoch)
+    optimizer = Adam(model.parameters(), lr=9e-05)
+    scheduler = ReduceLROnPlateau(optimizer, 'max', patience=2, factor=0.95)
+    scaler = GradScaler()
+    print(f"Patience: 2 Reduce factor: 0.95 Batch size: {batch_size}")
+
+    best_metric = -10000
+    for epoch in range(num_epochs):
+        model.train()
+        print(f"Epoch: {epoch+1}/{num_epochs}")
+        loss_val = 0.
+        total = 0
+
+        pbar = tqdm(train_loader, desc=f"Training Epoch {epoch+1}")
+        for i, (batch, mixes) in enumerate(pbar):
+            y = batch.to(device)
+            x = mixes.to(device)
+
+            # normalize input
+            mean, std = x.mean(), x.std()
+            x = (x - mean) / std
+            y = (y - mean) / std
+
+            with torch.cuda.amp.autocast(enabled=True):
+                y_ = model(x)
+                loss = masked_loss(y_, y, q=q)
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+
+            li = loss.item()
+            loss_val += li
+            total += 1
+            pbar.set_postfix({'loss': 100 * li, 'avg_loss': 100 * (loss_val / total)})
+        
+        avg_loss = loss_val / total
+        print(f"Training Loss: {avg_loss:.6f}")
+
+        # Save checkpoint
+        store_path = os.path.join(results_path, f'last_model.ckpt')
+        torch.save(model.state_dict(), store_path)
+
+        # Validation
+        # args = SimpleNamespace(valid_path=valid_path)
+        metrics_avg = valid(model=model, valid_path=valid_path, device=device, verbose=False)
+        metric_avg = metrics_avg.get('sdr', 0.0)
+
+        print(f"Validation SDR: {metric_avg:.4f}")
+        if metric_avg > best_metric:
+            best_metric = metric_avg
+            best_path = os.path.join(results_path, f"best_model_epoch_{epoch+1}_{metric_avg:.4f}.ckpt")
+            torch.save(model.state_dict(), best_path)
+            print(f"New best model saved: {best_path}")
+        scheduler.step(metric_avg)
+
+    print(f"Training complete. Best SDR: {best_metric:.4f}")
 
 
-    return model
+if __name__ == "__main__":
+
+    htdemucs = pretrained.get_model('htdemucs') # load pretrained htdemucs
+
+    # modify network to have 3 stems output
+    model = htdemucs.models[0]
+    model.sources = ['speech', 'music', 'sfx']
+    model.decoder[-1].conv_tr = torch.nn.ConvTranspose2d(
+    in_channels=48,  
+    out_channels=12,  # 3 stems * input channels (2 for stereo)
+    kernel_size=(8, 1),
+    stride=(4, 1)
+    )
+    model.tdecoder[-1].conv_tr = torch.nn.ConvTranspose1d(
+        in_channels=48,  
+        out_channels=6,
+        kernel_size=8,
+        stride=4
+    )
+
+    train_model(
+        model=model,
+        results_path='/Users/yt/coding/DL4CV/Final/Cinematic_sound_demixer/output/result/test',
+        data_path=['/Users/yt/coding/DL4CV/Final/Cinematic_sound_demixer/DnR/dnr_small/tr'],
+        valid_path=['/Users/yt/coding/DL4CV/Final/Cinematic_sound_demixer/DnR/dnr_small/cv'],
+        num_epochs=10
+    )
