@@ -86,7 +86,8 @@ def train_model(
     num_workers=4,
     seed=42,
     device_ids=[0],
-    early_stopping = False 
+    early_stopping = False,
+    valid_set_fraction = 1.0
 ):
     manual_seed(seed + int(time.time()))
     torch.backends.cudnn.deterministic = False
@@ -175,7 +176,7 @@ def train_model(
         torch.save(model.state_dict(), store_path)
 
         # Validation
-        metrics_avg = valid(model=model, valid_path=valid_path, device=device, batch_size=inference_batch_size, segment=segment)
+        metrics_avg = valid(model=model, valid_path=valid_path, device=device, batch_size=inference_batch_size, segment=segment, subset_fraction=valid_set_fraction)
         metric_avg = metrics_avg.get('sdr', 0.0)
 
         print(f"Validation SDR: {metric_avg:.4f}")
@@ -221,8 +222,9 @@ if __name__ == "__main__":
         data_path=['/Users/yt/coding/DL4CV/Final/Cinematic_sound_demixer/DnR/dnr_small/tr'],
         valid_path=['/Users/yt/coding/DL4CV/Final/Cinematic_sound_demixer/DnR/dnr_small/cv'],
         num_epochs=10,
-        batch_size=2,
+        batch_size=4,
         num_steps=1,
         segment=3,
-        early_stopping=True
+        early_stopping=True,
+        valid_set_fraction=0.5
     )

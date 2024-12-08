@@ -68,7 +68,7 @@ def get_predicted_audio_stems(model, sr, mix, device, segment=6, overlap=4, batc
     
 
 
-def valid(model, valid_path, extension='wav', target_sr=44100, segment=6, batch_size=8, device='cpu'):
+def valid(model, valid_path, extension='wav', target_sr=44100, segment=6, batch_size=8, subset_fraction=1.0, device='cpu'):
     """
     Validation function: loads sound files directly, ensures correct dimensions, and calculates SDR.
     """
@@ -79,13 +79,14 @@ def valid(model, valid_path, extension='wav', target_sr=44100, segment=6, batch_
     instruments = model.sources
     sdr_values = {instr: [] for instr in instruments}
 
-    valid_paths = []
+    valid_paths_all = []
     for path in valid_path:
-        valid_paths += sorted(glob.glob(os.path.join(path, '*', f'mix.{extension}')))
+        valid_paths_all += sorted(glob.glob(os.path.join(path, '*', f'mix.{extension}')))
 
-    print(f"Found {len(valid_paths)} mixtures for validation.")
+    valid_paths = valid_paths_all[:int(len(valid_paths_all)*subset_fraction)] #cut down the dataset size for faster training
+    print(f"Using {len(valid_paths)} out of {len(valid_paths_all)} mixtures for validation.")
 
-    chunk_size = segment * target_sr
+    # chunk_size = segment * target_sr
 
     with torch.no_grad():
         pbar = tqdm(valid_paths, desc="Validation")
