@@ -9,7 +9,7 @@ import torch.nn as nn
 import os
 
 def sdr(references, estimates):
-    # references and estimates: [N, time, channels]
+    # references and estimates shape: [N, time, channels]
     delta = 1e-7  # avoid numerical errors
     num = np.sum(np.square(references), axis=(1, 2))
     den = np.sum(np.square(references - estimates), axis=(1, 2))
@@ -17,12 +17,7 @@ def sdr(references, estimates):
     den += delta
     return 10 * np.log10(num / den)
 
-def get_predicted_audio_stems(model, sr, mix, device):
-    #TODO: parametrize configuration
-    segment = 6
-    overlap = 4
-    batch_size = 8
-
+def get_predicted_audio_stems(model, sr, mix, device, segment=6, overlap=4, batch_size=8):
     S = len(model.sources)
     C = sr * segment 
     N = overlap
@@ -40,10 +35,8 @@ def get_predicted_audio_stems(model, sr, mix, device):
             i = 0
             batch_data = []
             batch_locations = []
-            # progress_bar = tqdm(total=mix.shape[1], desc="Processing audio chunks", leave=False)
 
             while i < mix.shape[1]:
-                # print(i, i + C, mix.shape[1])
                 part = mix[:, i:i + C].to(device)
                 length = part.shape[-1]
                 if length < C:
@@ -64,12 +57,6 @@ def get_predicted_audio_stems(model, sr, mix, device):
                     batch_data = []
                     batch_locations = []
 
-            #     if progress_bar
-            #         progress_bar.update(step)
-
-            # if progress_bar:
-            #     progress_bar.close()
-
             estimated_sources = result / counter
             estimated_sources = estimated_sources.cpu().numpy()
             np.nan_to_num(estimated_sources, copy=False, nan=0.0)
@@ -80,35 +67,8 @@ def get_predicted_audio_stems(model, sr, mix, device):
         return estimated_sources
     
 
-def read_audio_chunk(file_path, chunk_size, target_sr, start_sample=0):
-    """
-    Reads a single chunk of audio data from the file.
 
-    Args:
-        file_path (str): Path to the audio file.
-        chunk_size (int): Number of samples to read.
-        target_sr (int): Target sample rate for resampling.
-        start_sample (int): Starting sample index for the chunk.
-
-    Returns:
-        chunk (numpy.ndarray): Audio chunk [channels, samples].
-        sr (int): Sample rate.
-    """
-    with sf.SoundFile(file_path) as audio_file:
-        sr = audio_file.samplerate
-        audio_file.seek(start_sample)
-
-        # Read a chunk of data
-        chunk = audio_file.read(chunk_size, dtype='float32', always_2d=True).T  # Shape: (channels, samples)
-
-        # Resample if needed
-        if sr != target_sr:
-            chunk = librosa.resample(chunk, orig_sr=sr, target_sr=target_sr, res_type='kaiser_best')
-
-        return chunk, target_sr
-
-
-def valid(model, valid_path, extension='wav', target_sr=44100, device='cpu', verbose=False):
+def valid(model, valid_path, extension='wav', target_sr=44100, segment=6, batch_size=8, device='cpu'):
     """
     Validation function: loads sound files directly, ensures correct dimensions, and calculates SDR.
     """
@@ -125,14 +85,13 @@ def valid(model, valid_path, extension='wav', target_sr=44100, device='cpu', ver
 
     print(f"Found {len(valid_paths)} mixtures for validation.")
 
-    chunk_size = 6 * target_sr
+    # chunk_size = segment * target_sr
 
     with torch.no_grad():
-        for mix_path in tqdm(valid_paths, desc="Validation"):
+        pbar = tqdm(valid_paths, desc="Validation")
+        for mix_path in pbar:
             # Load mixture
-            # mix, sr = read_audio_chunk(mix_path, chunk_size, target_sr)
-
-            mix, sr = sf.read(mix_path)  # shape: (samples,) or (samples, channels)
+            mix, sr = sf.read(mix_path)  # (samples, channels)
             # Ensure sample rate and channel matches for mix
             if sr != target_sr:
                 mix = librosa.resample(mix, orig_sr=sr, target_sr=target_sr, res_type='kaiser_best')
@@ -143,19 +102,16 @@ def valid(model, valid_path, extension='wav', target_sr=44100, device='cpu', ver
             mix = mix.T #(ch, waveform)
 
             mix = torch.tensor(mix, dtype=torch.float32)
-            waveforms = get_predicted_audio_stems(model, target_sr, mix, device)
+            waveforms = get_predicted_audio_stems(model, target_sr, mix, device, segment=segment, batch_size=batch_size)
 
             folder = os.path.dirname(mix_path)
             for instr in instruments:
                 gt_path = os.path.join(folder, f"{instr}.{extension}")
                 if not os.path.exists(gt_path):
-                    if verbose:
-                        print(f"Warning: Ground truth file missing for {instr} in {folder}. Skipping...")
+                    print(f"Warning: Ground truth file missing for {instr} in {folder}. Skipping...")
                     continue
 
                 # Load targets
-                # target_source, sr = read_audio_chunk(mix_path, chunk_size, target_sr)
-
                 target_source, sr_gt = sf.read(gt_path)
                 # Ensure sample rate and channel matches for target 
                 if sr_gt != sr:
@@ -172,6 +128,10 @@ def valid(model, valid_path, extension='wav', target_sr=44100, device='cpu', ver
                 estimates = np.expand_dims(estimated_source, axis=0) # (1, samples, 2)
                 sdr_val = sdr(references, estimates)[0]
                 sdr_values[instr].append(sdr_val)
+
+            all_sdr_vals = [val for values in sdr_values.values() for val in values]
+            current_sdr = np.mean(all_sdr_vals) if all_sdr_vals else 0.0
+            pbar.set_postfix({'current_sdr': current_sdr})
 
     # Compute average SDR
     metrics_avg = {}

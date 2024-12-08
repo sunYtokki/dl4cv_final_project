@@ -17,6 +17,26 @@ from valid import valid
 import warnings
 warnings.filterwarnings("ignore")
 
+# Helper class for early stopping logic on validation loss
+class EarlyStopping:
+    def __init__(self, patience=10, min_delta=0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_metric = -np.inf
+        self.early_stop = False
+
+    def __call__(self, metric):
+        if metric > self.best_metric - self.min_delta:
+            self.best_metric = metric
+            self.counter = 0  # Reset counter if improvement is seen
+        else:
+            self.counter += 1
+            print(f"No improvement in validation loss. Counter: {self.counter}/{self.patience}")
+            if self.counter >= self.patience:
+                self.early_stop = True
+                print("Early stopping triggered")
+
 
 def masked_loss(y_, y, q, coarse=True):
     loss = torch.nn.MSELoss(reduction='none')(y_, y).transpose(0, 1)
@@ -57,12 +77,16 @@ def train_model(
     data_path=None,
     valid_path=None,
     num_epochs=100,
+    num_steps=1,
     instruments = ['speech', 'music', 'sfx'],
     batch_size = 6,
+    inference_batch_size = 8,
+    segment = 6, # Duration of each audio chunk in seconds for training 
     q = 0.95,
     num_workers=4,
     seed=42,
     device_ids=[0],
+    early_stopping = None
 ):
     manual_seed(seed + int(time.time()))
     torch.backends.cudnn.deterministic = False
@@ -70,20 +94,19 @@ def train_model(
       torch.multiprocessing.set_start_method('spawn', force=True)
 
     # Load model and configuration
-    # model, config = get_model_from_config(model_type, config_path)
-    # config = OmegaConf.load(config_path)
     print("Instruments: {}".format(instruments))
 
     os.makedirs(results_path, exist_ok=True)
 
-    # batch_size = config.training.batch_size * len(device_ids)
     batch_size = batch_size * len(device_ids)
-    print("Metrics for training: SDR. Metric for scheduler: SDR")
+    print("Metrics for training: SDR.")
 
     trainset = MSSDataset(
         instruments = model.sources,
         data_path=data_path,
         batch_size=batch_size,
+        segment=segment,
+        num_steps=num_steps,
         metadata_path=os.path.join(results_path, f'metadata.pkl'),
     )
 
@@ -118,17 +141,17 @@ def train_model(
 
         pbar = tqdm(train_loader, desc=f"Training Epoch {epoch+1}")
         for i, (batch, mixes) in enumerate(pbar):
-            y = batch.to(device)
+            target = batch.to(device)
             x = mixes.to(device)
 
             # normalize input
             mean, std = x.mean(), x.std()
             x = (x - mean) / std
-            y = (y - mean) / std
+            target = (target - mean) / std
 
             with torch.cuda.amp.autocast(enabled=True):
-                y_ = model(x)
-                loss = masked_loss(y_, y, q=q)
+                predicted = model(x)
+                loss = masked_loss(predicted, target, q=q)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -148,8 +171,7 @@ def train_model(
         torch.save(model.state_dict(), store_path)
 
         # Validation
-        # args = SimpleNamespace(valid_path=valid_path)
-        metrics_avg = valid(model=model, valid_path=valid_path, device=device, verbose=False)
+        metrics_avg = valid(model=model, valid_path=valid_path, device=device, segment=segment, batch_size=inference_batch_size)
         metric_avg = metrics_avg.get('sdr', 0.0)
 
         print(f"Validation SDR: {metric_avg:.4f}")
@@ -158,7 +180,13 @@ def train_model(
             best_path = os.path.join(results_path, f"best_model_epoch_{epoch+1}_{metric_avg:.4f}.ckpt")
             torch.save(model.state_dict(), best_path)
             print(f"New best model saved: {best_path}")
+
         scheduler.step(metric_avg)
+
+        if early_stopping:
+            early_stopping(metrics_avg, model, results_path, epoch)  # Minimize validation loss
+            if early_stopping.early_stop:
+                break
 
     print(f"Training complete. Best SDR: {best_metric:.4f}")
 
@@ -188,5 +216,7 @@ if __name__ == "__main__":
         results_path='/Users/yt/coding/DL4CV/Final/Cinematic_sound_demixer/output/result/test',
         data_path=['/Users/yt/coding/DL4CV/Final/Cinematic_sound_demixer/DnR/dnr_small/tr'],
         valid_path=['/Users/yt/coding/DL4CV/Final/Cinematic_sound_demixer/DnR/dnr_small/cv'],
-        num_epochs=10
+        num_epochs=10,
+        batch_size=2,
+        segment=3
     )

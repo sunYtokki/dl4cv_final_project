@@ -35,7 +35,6 @@ def load_chunk(path, length, chunk_size, offset=None):
     x = _mono_to_stereo(x)
     return x.T
 
-
 def get_track_set_length(params):
     path, instruments, file_types = params
     # Check lengths of all instruments (it can be different in some cases)
@@ -70,7 +69,7 @@ def get_track_length(params):
 
 
 class MSSDataset(torch.utils.data.Dataset):
-    def __init__(self, instruments, data_path, chunk_size=44100*6, metadata_path="metadata.pkl", batch_size=None, num_steps = 1, verbose=True):
+    def __init__(self, instruments, data_path, sr=44100, segment=6, metadata_path="metadata.pkl", batch_size=None, num_steps = 100, verbose=True):
         self.verbose = verbose
         self.data_path = data_path
         self.instruments = instruments 
@@ -78,6 +77,8 @@ class MSSDataset(torch.utils.data.Dataset):
         self.file_types = ['wav']
         self.metadata_path = metadata_path
         self.num_steps = num_steps
+        self.chunk_size = sr*segment
+        self.min_mean_abs = 0.001
 
         metadata = self.get_metadata()
 
@@ -89,8 +90,6 @@ class MSSDataset(torch.utils.data.Dataset):
             exit()
 
         self.metadata = metadata
-        self.chunk_size = chunk_size 
-        self.min_mean_abs = 0.001
 
     def __len__(self):
         return self.num_steps * self.batch_size
