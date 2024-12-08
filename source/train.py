@@ -77,16 +77,16 @@ def train_model(
     data_path=None,
     valid_path=None,
     num_epochs=100,
-    num_steps=1,
+    num_steps=1000,
     instruments = ['speech', 'music', 'sfx'],
-    batch_size = 6,
+    batch_size = 8,
+    segment = 8, # Duration of each audio chunk in seconds for training 
     inference_batch_size = 8,
-    segment = 6, # Duration of each audio chunk in seconds for training 
     q = 0.95,
     num_workers=4,
     seed=42,
     device_ids=[0],
-    early_stopping = None
+    early_stopping = False 
 ):
     manual_seed(seed + int(time.time()))
     torch.backends.cudnn.deterministic = False
@@ -114,6 +114,10 @@ def train_model(
         trainset, batch_size=batch_size, shuffle=True,
         num_workers=num_workers, pin_memory=True
     )
+
+    if early_stopping:
+        early_stopping = EarlyStopping()
+        print('Early stopping enabled.')
 
     if torch.cuda.is_available():
         if len(device_ids) <= 1:
@@ -171,7 +175,7 @@ def train_model(
         torch.save(model.state_dict(), store_path)
 
         # Validation
-        metrics_avg = valid(model=model, valid_path=valid_path, device=device, segment=segment, batch_size=inference_batch_size)
+        metrics_avg = valid(model=model, valid_path=valid_path, device=device, batch_size=inference_batch_size, segment=segment)
         metric_avg = metrics_avg.get('sdr', 0.0)
 
         print(f"Validation SDR: {metric_avg:.4f}")
@@ -184,7 +188,7 @@ def train_model(
         scheduler.step(metric_avg)
 
         if early_stopping:
-            early_stopping(metrics_avg, model, results_path, epoch)  # Minimize validation loss
+            early_stopping(metric_avg)  # Minimize validation loss
             if early_stopping.early_stop:
                 break
 
@@ -218,5 +222,7 @@ if __name__ == "__main__":
         valid_path=['/Users/yt/coding/DL4CV/Final/Cinematic_sound_demixer/DnR/dnr_small/cv'],
         num_epochs=10,
         batch_size=2,
-        segment=3
+        num_steps=1,
+        segment=3,
+        early_stopping=True
     )

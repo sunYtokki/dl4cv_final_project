@@ -85,7 +85,7 @@ def valid(model, valid_path, extension='wav', target_sr=44100, segment=6, batch_
 
     print(f"Found {len(valid_paths)} mixtures for validation.")
 
-    # chunk_size = segment * target_sr
+    chunk_size = segment * target_sr
 
     with torch.no_grad():
         pbar = tqdm(valid_paths, desc="Validation")
