@@ -130,9 +130,13 @@ def valid(model, valid_path, extension='wav', target_sr=44100, segment=6, batch_
                 sdr_val = sdr(references, estimates)[0]
                 sdr_values[instr].append(sdr_val)
 
+            pbar_dict = {}
+            metric_name="sdr"
+            for instr in model.sources:
+                pbar_dict[f'{metric_name}_{instr}'] = "{:.4f}".format(sdr_values[instr][0])
+
             all_sdr_vals = [val for values in sdr_values.values() for val in values]
-            current_sdr = np.mean(all_sdr_vals) if all_sdr_vals else 0.0
-            pbar.set_postfix({'current_sdr': current_sdr})
+            pbar.set_postfix(pbar_dict)
 
     # Compute average SDR
     metrics_avg = {}
