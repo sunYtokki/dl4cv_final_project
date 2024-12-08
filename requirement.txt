@@ -1,9 +1,10 @@
-# TODO: fix the format 
-!pip install tqdm
-!pip install torchvision
-!pip install demucs
-!pip install librosa
-!pip install torch
-!pip install audiomentations
-!pip install soundfile
-!pip install pedalboard
+torch>=2.0.1
+numpy
+tqdm
+torchvision
+demucs
+librosa
+soundfile
+audiomentations
+pedalboard
+demucs==4.0.0
