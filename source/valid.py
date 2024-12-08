@@ -40,7 +40,7 @@ def get_predicted_audio_stems(model, sr, mix, device):
             i = 0
             batch_data = []
             batch_locations = []
-            progress_bar = tqdm(total=mix.shape[1], desc="Processing audio chunks", leave=False)
+            # progress_bar = tqdm(total=mix.shape[1], desc="Processing audio chunks", leave=False)
 
             while i < mix.shape[1]:
                 # print(i, i + C, mix.shape[1])
@@ -64,11 +64,11 @@ def get_predicted_audio_stems(model, sr, mix, device):
                     batch_data = []
                     batch_locations = []
 
-                if progress_bar:
-                    progress_bar.update(step)
+            #     if progress_bar
+            #         progress_bar.update(step)
 
-            if progress_bar:
-                progress_bar.close()
+            # if progress_bar:
+            #     progress_bar.close()
 
             estimated_sources = result / counter
             estimated_sources = estimated_sources.cpu().numpy()
@@ -128,7 +128,7 @@ def valid(model, valid_path, extension='wav', target_sr=44100, device='cpu', ver
     chunk_size = 6 * target_sr
 
     with torch.no_grad():
-        for mix_path in tqdm(valid_paths, desc="Validation", disable=not verbose):
+        for mix_path in tqdm(valid_paths, desc="Validation"):
             # Load mixture
             # mix, sr = read_audio_chunk(mix_path, chunk_size, target_sr)
 

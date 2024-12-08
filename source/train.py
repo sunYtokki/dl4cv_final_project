@@ -66,7 +66,8 @@ def train_model(
 ):
     manual_seed(seed + int(time.time()))
     torch.backends.cudnn.deterministic = False
-    torch.multiprocessing.set_start_method('spawn')
+    if torch.multiprocessing.get_start_method(allow_none=True) != 'spawn':
+      torch.multiprocessing.set_start_method('spawn', force=True)
 
     # Load model and configuration
     # model, config = get_model_from_config(model_type, config_path)
