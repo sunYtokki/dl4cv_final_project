@@ -90,9 +90,9 @@ def train_model(
     valid_set_fraction = 1.0
 ):
     manual_seed(seed + int(time.time()))
-    torch.backends.cudnn.deterministic = False
-    if torch.multiprocessing.get_start_method(allow_none=True) != 'spawn':
-      torch.multiprocessing.set_start_method('spawn', force=True)
+    # torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False # Fix possible slow down with dilation convolutions
+    torch.multiprocessing.set_start_method('spawn')
 
     # Load model and configuration
     print("Instruments: {}".format(instruments))
@@ -140,6 +140,8 @@ def train_model(
     best_metric = -10000
     for epoch in range(num_epochs):
         model.train()
+        torch.cuda.empty_cache()
+
         print(f"Epoch: {epoch+1}/{num_epochs}")
         loss_val = 0.
         total = 0
@@ -192,6 +194,9 @@ def train_model(
             early_stopping(metric_avg)  # Minimize validation loss
             if early_stopping.early_stop:
                 break
+        
+        if epoch % 2 == 0:
+            torch.cuda.empty_cache()
 
     print(f"Training complete. Best SDR: {best_metric:.4f}")
 
@@ -225,6 +230,6 @@ if __name__ == "__main__":
         batch_size=4,
         num_steps=1,
         segment=3,
-        early_stopping=True,
-        valid_set_fraction=0.5
+        early_stopping=False,
+        valid_set_fraction=0.0
     )
