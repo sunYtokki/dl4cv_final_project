@@ -1,4 +1,3 @@
-# forked from https://github.com/ZFTurbo/Music-Source-Separation-Training/blob/a45d9bc7889184efecec3f79ec4d06143afa7d4a/dataset.py
 
 import os
 import random

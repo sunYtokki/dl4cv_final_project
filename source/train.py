@@ -194,9 +194,6 @@ def train_model(
             early_stopping(metric_avg)  # Minimize validation loss
             if early_stopping.early_stop:
                 break
-        
-        if epoch % 2 == 0:
-            torch.cuda.empty_cache()
 
     print(f"Training complete. Best SDR: {best_metric:.4f}")
 
