@@ -169,7 +169,9 @@ def train_model(
             loss_val += li
             total += 1
             pbar.set_postfix({'loss': 100 * li, 'avg_loss': 100 * (loss_val / total)})
-        pbar.close()
+
+        if pbar:
+            pbar.close()
         
         avg_loss = loss_val / total
         print(f"Training Loss: {avg_loss:.6f}")
@@ -229,5 +231,5 @@ if __name__ == "__main__":
         num_steps=1,
         segment=3,
         early_stopping=False,
-        valid_set_fraction=0.5
+        valid_set_fraction=0.2
     )
